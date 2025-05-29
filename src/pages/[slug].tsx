@@ -1,4 +1,9 @@
-import type { GetStaticPaths, GetStaticProps } from "next";
+import type {
+  GetStaticPaths,
+  GetStaticProps,
+  InferGetStaticPropsType,
+} from "next";
+import { fetchWithRateLimit } from "@/lib/rateLimiter";
 
 type ExampleModel = {
   id: string;
@@ -12,9 +17,7 @@ export default function ExamplePage({
   slug,
   title,
   textArea,
-}: ExampleModel) {
-  // You could also use InferGetStaticPropsType<typeof getStaticProps>
-  // instead of PageProps here if you prefer.
+}: InferGetStaticPropsType<typeof getStaticProps>) {
   return (
     <div>
       <h1>{title}</h1>
@@ -33,7 +36,7 @@ export default function ExamplePage({
 
 const fetchFromDato = async (body: object) => {
   try {
-    const response = await fetch("https://graphql.datocms.com/", {
+    const response = await fetchWithRateLimit("https://graphql.datocms.com/", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -62,37 +65,42 @@ const fetchFromDato = async (body: object) => {
       // throw new Error("GraphQL errors in response");
     }
 
-    return json;
+    if (!!json.data) {
+      return json.data;
+    }
+
+    console.log("Raw JSON response from DatoCMS", json);
   } catch (err) {
     console.error("Error fetching from DatoCMS:", err);
-    throw err; // re-throw so caller knows something went wrong
+    throw err;
   }
 };
 
 export const getStaticProps = (async ({ params }) => {
-  const slug =
-    typeof params?.slug === "string" ? params.slug : (params?.slug?.[0] ?? "");
+  const { slug } = params as { slug?: string };
+  if (!slug) {
+    return {
+      notFound: true,
+      revalidate: 5,
+    };
+  }
 
-  const recordQuery = {
+  const singleRecordRequestBody = {
     query:
       //language=gql
-      `
-        query ExampleModelQuery($slug: String) {
-          exampleModel(filter: { slug: { eq: $slug } }) {
-            id
-            slug
-            title
-            textArea
-          }
+      `query ($slug: String) {
+        exampleModel(filter: { slug: { eq: $slug } }) {
+          id
+          slug
+          title
+          textArea
         }
+      }
       `,
     variables: { slug },
-    operationName: "ExampleModelQuery",
   };
 
-  const {
-    data: { exampleModel: record },
-  } = await fetchFromDato(recordQuery);
+  const { exampleModel: record } = await fetchFromDato(singleRecordRequestBody);
 
   return {
     props: {
@@ -101,37 +109,80 @@ export const getStaticProps = (async ({ params }) => {
       title: record.title,
       textArea: record.textArea,
     },
-    // optional: revalidate every 60s
-    // revalidate: 60,
+    revalidate: 60,
   };
 }) satisfies GetStaticProps<ExampleModel>;
 
-export const getStaticPaths = (async () => {
-  const allSlugsQuery = {
-    query:
-      //language=gql
-      `
-        query AllSlugsQuery {
-          allExampleModels(first: 500) {
+export const getStaticPaths: GetStaticPaths = async () => {
+  // 1) Get total count
+  const slugCountResponse = await fetchFromDato({
+    query: `query {
+      _allExampleModelsMeta { count }
+    }`,
+  });
+  const {
+    _allExampleModelsMeta: { count },
+  } = slugCountResponse as { _allExampleModelsMeta: { count: number } };
+
+  // 2) Compute total pages of up to 500 items each
+  const ITEMS_PER_PAGE = 500;
+  const totalPages = Math.ceil(count / ITEMS_PER_PAGE);
+
+  // 3) Build an array [0,1,2,...,totalPages-1]
+  const pages = Array.from({ length: totalPages }, (_, i) => i);
+
+  // 4) Chunk into batches of up to 5 pages
+  const MAX_PAGES_PER_CALL = 5;
+  const batches: number[][] = [];
+  for (let i = 0; i < pages.length; i += MAX_PAGES_PER_CALL) {
+    batches.push(pages.slice(i, i + MAX_PAGES_PER_CALL));
+  }
+
+  // 5) Fire each batch sequentially, build and concat all results
+  const allRecords: Pick<ExampleModel, "id" | "slug">[] = [];
+
+  for (const batch of batches) {
+    // a) Dynamically build the sub‐queries for this batch
+    const queryFields = batch
+      .map((pageIndex) => {
+        const skip = pageIndex * ITEMS_PER_PAGE;
+        // name each field uniquely so we can pick it out afterward
+        const fieldName = `pg_${pageIndex + 1}`;
+        return `
+          ${fieldName}: allExampleModels(first: ${ITEMS_PER_PAGE}, skip: ${skip}) {
             id
             slug
           }
-        }
-      `,
-    operationName: "AllSlugsQuery",
-  };
+        `;
+      })
+      .join("\n");
 
-  const response = await fetchFromDato(allSlugsQuery);
-  const {
-    data: { allExampleModels },
-  } = response as {
-    data: { allExampleModels: Pick<ExampleModel, "id" | "slug">[] };
-  };
+    // b) Fetch that batch
+    const batchQuery = {
+      query: `query {
+        ${queryFields}
+      }`,
+    };
+    const batchRes = (await fetchFromDato(batchQuery)) as Record<
+      string,
+      Pick<ExampleModel, "id" | "slug">[]
+    >;
+
+    // c) Unpack each page’s results in order
+    for (const pageIndex of batch) {
+      const fieldName = `pg_${pageIndex + 1}`;
+      const records = batchRes[fieldName] ?? [];
+      allRecords.push(...records);
+    }
+  }
+
+  // 6) Build the paths array
+  const paths = allRecords.map((rec) => ({
+    params: { slug: rec.slug },
+  }));
 
   return {
-    paths: allExampleModels.map((rec) => ({
-      params: { slug: rec.slug },
-    })),
-    fallback: true,
+    paths,
+    fallback: "blocking",
   };
-}) satisfies GetStaticPaths;
+};
