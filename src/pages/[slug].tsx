@@ -3,13 +3,19 @@ import type {
   GetStaticProps,
   InferGetStaticPropsType,
 } from "next";
-import { fetchWithRateLimit } from "@/lib/rateLimiter";
+
+import { executeQuery } from "@datocms/cda-client";
 
 type ExampleModel = {
   id: string;
   slug: string;
   title: string;
   textArea: string; // ← match your GraphQL field
+};
+
+type CDARequestBody = {
+  query: string;
+  variables?: Record<string, string>;
 };
 
 export default function ExamplePage({
@@ -34,42 +40,14 @@ export default function ExamplePage({
   );
 }
 
-const fetchFromDato = async (body: object) => {
+const fetchFromDato = async (body: CDARequestBody) => {
   try {
-    const response = await fetchWithRateLimit("https://graphql.datocms.com/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.DATOCMS_GRAPHQL_API_KEY}`,
-        "X-Exclude-Invalid": "true",
-        "X-Environment": "main",
-      },
-      body: JSON.stringify(body),
+    const result = await executeQuery(body.query, {
+      token: process.env.DATOCMS_GRAPHQL_API_KEY!,
+      ...(body.variables && { variables: body.variables }),
     });
 
-    // HTTP error?
-    if (!response.ok) {
-      console.log(
-        `DatoCMS HTTP error: ${response.status} ${response.statusText}`,
-      );
-      // Optionally you could throw here to bubble up
-      // throw new Error(`HTTP Error ${response.status}`);
-    }
-
-    const json = await response.json();
-
-    // GraphQL-level errors?
-    if (Array.isArray(json.errors) && json.errors.length > 0) {
-      console.log("DatoCMS GraphQL errors:", json.errors);
-      // Optionally throw if you want to treat GraphQL errors as fatal:
-      // throw new Error("GraphQL errors in response");
-    }
-
-    if (json.data) {
-      return json.data;
-    }
-
-    console.log("Raw JSON response from DatoCMS", json);
+    return result;
   } catch (err) {
     console.log("Error fetching from DatoCMS:", err);
     throw err;
@@ -94,13 +72,18 @@ export const getStaticProps = (async ({ params }) => {
           slug
           title
           textArea
+          blah: title
         }
       }
       `,
     variables: { slug },
   };
 
-  const { exampleModel: record } = await fetchFromDato(singleRecordRequestBody);
+  const singleRecordResponse = await fetchFromDato(singleRecordRequestBody);
+
+  const { exampleModel: record } = singleRecordResponse as {
+    exampleModel: Record<string, string>;
+  };
 
   return {
     props: {

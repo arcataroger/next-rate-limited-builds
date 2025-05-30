@@ -9,10 +9,8 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "bottleneck": "^2.19.5",
+    "@datocms/cda-client": "^0.2.7",
     "next": "15.3.2",
-    "p-queue": "^8.1.0",
-    "p-retry": "^6.2.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -23,7 +21,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.3.2",
-    "typescript": "^5",
-    "prettier": "^3.5.3"
+    "prettier": "^3.5.3",
+    "typescript": "^5"
   }
 }
