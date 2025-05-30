@@ -1,67 +1,70 @@
 import PQueue from "p-queue";
-import pRetry, { FailedAttemptError } from "p-retry";
 
-const REQUESTS_PER_MINUTE_MAX = 1000; // DatoCMS CDA limit https://www.datocms.com/docs/content-delivery-api/technical-limits#cda-rate-limits
-const SAFETY_FACTOR = 0.9; // Just to account for network jitter
+const REQUESTS_PER_MINUTE_MAX = 1000;
+const SAFETY_FACTOR = 0.9;
 
-// Create a queue to space out our requests as evenly ass possible
 const queue = new PQueue({
   intervalCap: 1,
   interval: (REQUESTS_PER_MINUTE_MAX * SAFETY_FACTOR) / 60000,
-  carryoverConcurrencyCount: true,
+  carryoverConcurrencyCount: false,
 });
+
+// Shared rate limit state
+let globalTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+let globalTimeoutEnd = 0;
+
+function scheduleGlobalPause(waitMs: number) {
+  const now = Date.now();
+  const newTimeoutEnd = now + waitMs;
+
+  if (newTimeoutEnd > globalTimeoutEnd) {
+    globalTimeoutEnd = newTimeoutEnd;
+
+    if (globalTimeoutHandle) {
+      clearTimeout(globalTimeoutHandle);
+    }
+
+    if (!queue.isPaused) {
+      queue.pause();
+    }
+
+    globalTimeoutHandle = setTimeout(() => {
+      queue.start();
+      globalTimeoutHandle = null;
+      globalTimeoutEnd = 0;
+    }, waitMs);
+  }
+}
 
 export async function fetchWithRateLimit(
   input: RequestInfo,
   init?: RequestInit,
 ): Promise<Response> {
-  const fetchWithRetryHandler = () =>
-    pRetry(
-      async () => {
-        const response = await fetch(input, init);
+  const result = await queue.add<Response>(async (): Promise<Response> => {
+    const res = await fetch(input, init);
 
-        if (!response?.ok) {
-          // throw to trigger retry logic
-          throw new Error("Fetch error inside rate limiter", {
-            cause: response,
-          });
-        }
+    if (res.ok) {
+      return res;
+    }
 
-        return response;
-      },
-      {
-        retries: 10,
-        factor: 2,
-        minTimeout: 1_000,
-        maxTimeout: 60_000,
-        onFailedAttempt(err: FailedAttemptError) {
-          if (isRateLimitError(err)) {
-            console.warn(
-              `429 rate limited, will auto-retry ${err.retriesLeft} more times`,
-              err,
-            );
-          } else {
-            throw new Error("Non rate-limit error detected, aborting fetch", {
-              cause: err,
-            });
-          }
-        },
-        shouldRetry(err: FailedAttemptError) {
-          return isRateLimitError(err);
-        },
-      },
-    );
+    if (res.status === 429) {
+      const resetHeader = res.headers.get("x-ratelimit-reset");
+      const delaySeconds = resetHeader ? Number(resetHeader) : 3;
+      const waitMs = delaySeconds * 1000;
 
-  const result = await queue.add(fetchWithRetryHandler);
+      scheduleGlobalPause(waitMs);
+
+      // Retry after some delay
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return fetchWithRateLimit(input, init);
+    }
+
+    throw new Error(`HTTP ${res.status}`, { cause: res });
+  });
 
   if (!(result instanceof Response)) {
-    throw new Error(
-      `fetchWithRateLimit: Unexpected result (${typeof result}), expected Response`,
-    );
+    throw new Error("Unhandled response type", { cause: result });
   }
 
   return result;
 }
-
-const isRateLimitError = (err: FailedAttemptError): boolean =>
-  err.cause instanceof Response && err.cause.status === 429;

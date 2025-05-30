@@ -49,7 +49,7 @@ const fetchFromDato = async (body: object) => {
 
     // HTTP error?
     if (!response.ok) {
-      console.error(
+      console.log(
         `DatoCMS HTTP error: ${response.status} ${response.statusText}`,
       );
       // Optionally you could throw here to bubble up
@@ -60,18 +60,18 @@ const fetchFromDato = async (body: object) => {
 
     // GraphQL-level errors?
     if (Array.isArray(json.errors) && json.errors.length > 0) {
-      console.error("DatoCMS GraphQL errors:", json.errors);
+      console.log("DatoCMS GraphQL errors:", json.errors);
       // Optionally throw if you want to treat GraphQL errors as fatal:
       // throw new Error("GraphQL errors in response");
     }
 
-    if (!!json.data) {
+    if (json.data) {
       return json.data;
     }
 
     console.log("Raw JSON response from DatoCMS", json);
   } catch (err) {
-    console.error("Error fetching from DatoCMS:", err);
+    console.log("Error fetching from DatoCMS:", err);
     throw err;
   }
 };
@@ -116,7 +116,9 @@ export const getStaticProps = (async ({ params }) => {
 export const getStaticPaths: GetStaticPaths = async () => {
   // 1) Get total count
   const slugCountResponse = await fetchFromDato({
-    query: `query {
+    query:
+      //language=gql
+      `query {
       _allExampleModelsMeta { count }
     }`,
   });
@@ -183,6 +185,6 @@ export const getStaticPaths: GetStaticPaths = async () => {
 
   return {
     paths,
-    fallback: "blocking",
+    fallback: true,
   };
 };
